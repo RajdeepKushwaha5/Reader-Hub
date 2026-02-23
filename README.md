@@ -2,7 +2,6 @@
 
 Reader Hub is a modern, high-performance web platform dedicated to deep-diving into the architecture of scalable systems. Curated and built by **Rajdeep Singh**, it provides a structured 30-day journey through system design concepts with a premium, focused reading experience.
 
-![Hero Section](file:///d:/systemdesign_web/images/day-0.jpg) *(Example Hero Image)*
 
 ## ✨ Key Features
 
