@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 
@@ -1331,6 +1331,7 @@ const renderBlock = (block, idx) => {
       if (isTakeaway) {
         return (
           <div key={idx} className="article-takeaway" role="note">
+            <span className="takeaway-label">Key Takeaway</span>
             {parseBold(block.text)}
           </div>
         );
@@ -1340,7 +1341,7 @@ const renderBlock = (block, idx) => {
     case 'h2':
       return <h2 key={idx}>{block.text}</h2>;
     case 'h3':
-      return <h3 key={idx} style={{ fontSize: '1.25rem', fontFamily: 'var(--font-sans)', fontWeight: 700, marginTop: '36px', marginBottom: '16px' }}>{block.text}</h3>;
+      return <h3 key={idx}>{block.text}</h3>;
     case 'list':
       return (
         <ul key={idx} role="list">
@@ -1402,6 +1403,34 @@ const ReadingProgress = () => {
       aria-valuemax={100}
       aria-label="Reading progress"
     />
+  );
+};
+
+/* =====================================================================
+   SCROLL TO TOP
+   ===================================================================== */
+const ScrollToTop = () => {
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    const toggle = () => setVisible(window.scrollY > 400);
+    window.addEventListener('scroll', toggle, { passive: true });
+    return () => window.removeEventListener('scroll', toggle);
+  }, []);
+
+  if (!visible) return null;
+
+  return (
+    <motion.button
+      initial={{ opacity: 0, scale: 0.8 }}
+      animate={{ opacity: 1, scale: 1 }}
+      exit={{ opacity: 0, scale: 0.8 }}
+      onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+      className="scroll-to-top"
+      aria-label="Scroll to top"
+    >
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="18 15 12 9 6 15" /></svg>
+    </motion.button>
   );
 };
 
@@ -1507,22 +1536,115 @@ const Article = ({ article, fontSize, setFontSize, allArticles, setCurrentArticl
 /* =====================================================================
    BROWSE VIEW with Search & Filter
    ===================================================================== */
+
+/* Pre-compute a searchable text index per article (runs once) */
+const searchIndex = articles.map(article => {
+  const contentText = (article.content || [])
+    .map(b => {
+      if (b.text) return b.text;
+      if (b.items) return b.items.join(' ');
+      return '';
+    })
+    .join(' ')
+    .toLowerCase();
+
+  return {
+    id: article.id,
+    title: article.title.toLowerCase(),
+    category: article.category.toLowerCase(),
+    date: article.date.toLowerCase(),
+    excerpt: (article.excerpt || '').toLowerCase(),
+    contentText,
+  };
+});
+
+/**
+ * Ranked search: splits query into tokens, scores each article by
+ * where and how many tokens match. Title/date matches score higher
+ * than body content matches. All tokens must match somewhere (AND logic).
+ */
+const scoreArticle = (idx, tokens) => {
+  let score = 0;
+  for (const token of tokens) {
+    let tokenFound = false;
+
+    // Title match (highest weight)
+    if (idx.title.includes(token)) {
+      score += 10;
+      tokenFound = true;
+    }
+    // Category match
+    if (idx.category.includes(token)) {
+      score += 6;
+      tokenFound = true;
+    }
+    // Date match (e.g. "day 5")
+    if (idx.date.includes(token)) {
+      score += 8;
+      tokenFound = true;
+    }
+    // Excerpt match
+    if (idx.excerpt.includes(token)) {
+      score += 4;
+      tokenFound = true;
+    }
+    // Content match (lowest weight but still valid)
+    if (idx.contentText.includes(token)) {
+      score += 2;
+      tokenFound = true;
+    }
+
+    // ALL tokens must match somewhere (AND logic)
+    if (!tokenFound) return -1;
+  }
+  return score;
+};
+
 const Browse = ({ setView, setCurrentArticleId }) => {
   const [query, setQuery] = useState('');
+  const [debouncedQuery, setDebouncedQuery] = useState('');
   const [activeCategory, setActiveCategory] = useState('All');
+  const debounceRef = useRef(null);
 
-  const reversedArticles = [...articles].reverse();
+  // Debounce search input by 150ms
+  const handleQueryChange = useCallback((e) => {
+    const val = e.target.value;
+    setQuery(val);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => setDebouncedQuery(val), 150);
+  }, []);
 
-  const filtered = reversedArticles.filter(article => {
-    const matchesCategory = activeCategory === 'All' || article.category === activeCategory;
-    const q = query.toLowerCase().trim();
-    const matchesQuery = !q
-      || article.title.toLowerCase().includes(q)
-      || article.category.toLowerCase().includes(q)
-      || article.date.toLowerCase().includes(q)
-      || (article.content || []).some(b => b.text && b.text.toLowerCase().includes(q));
-    return matchesCategory && matchesQuery;
-  });
+  useEffect(() => {
+    return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
+  }, []);
+
+  const reversedArticles = useMemo(() => [...articles].reverse(), []);
+
+  const filtered = useMemo(() => {
+    // Category filter
+    let pool = reversedArticles;
+    if (activeCategory !== 'All') {
+      pool = pool.filter(a => a.category === activeCategory);
+    }
+
+    const q = debouncedQuery.toLowerCase().trim();
+    if (!q) return pool;
+
+    // Tokenize: split on spaces, filter out empty strings
+    const tokens = q.split(/\s+/).filter(Boolean);
+    if (tokens.length === 0) return pool;
+
+    // Score and rank
+    const scored = pool
+      .map(article => {
+        const idx = searchIndex.find(s => s.id === article.id);
+        return { article, score: scoreArticle(idx, tokens) };
+      })
+      .filter(item => item.score > 0)
+      .sort((a, b) => b.score - a.score);
+
+    return scored.map(item => item.article);
+  }, [reversedArticles, activeCategory, debouncedQuery]);
 
   const openArticle = (id) => {
     setCurrentArticleId(id);
@@ -1539,41 +1661,59 @@ const Browse = ({ setView, setCurrentArticleId }) => {
           <motion.div
             initial={{ opacity: 0, scale: 0.8 }}
             animate={{
-              opacity: [0.3, 0.5, 0.3],
-              scale: [1, 1.2, 1],
-              x: [0, 50, 0],
-              y: [0, -30, 0]
+              opacity: [0.15, 0.3, 0.15],
+              scale: [1, 1.3, 1],
+              x: [0, 60, 0],
+              y: [0, -40, 0]
             }}
-            transition={{ duration: 20, repeat: Infinity, ease: "linear" }}
+            transition={{ duration: 18, repeat: Infinity, ease: "linear" }}
             style={{
               position: 'absolute',
-              top: '-10%',
-              left: '10%',
-              width: '400px',
-              height: '400px',
+              top: '-20%',
+              left: '5%',
+              width: '500px',
+              height: '500px',
               borderRadius: '50%',
-              background: 'radial-gradient(circle, var(--accent-light) 0%, transparent 70%)',
-              filter: 'blur(60px)',
+              background: 'radial-gradient(circle, #3b82f6 0%, transparent 70%)',
+              filter: 'blur(80px)',
             }}
           />
           <motion.div
             initial={{ opacity: 0, scale: 0.8 }}
             animate={{
-              opacity: [0.2, 0.4, 0.2],
+              opacity: [0.1, 0.25, 0.1],
               scale: [1.2, 1, 1.2],
-              x: [0, -60, 0],
-              y: [0, 40, 0]
+              x: [0, -70, 0],
+              y: [0, 50, 0]
             }}
-            transition={{ duration: 25, repeat: Infinity, ease: "linear" }}
+            transition={{ duration: 22, repeat: Infinity, ease: "linear" }}
             style={{
               position: 'absolute',
-              bottom: '-10%',
-              right: '5%',
-              width: '500px',
-              height: '500px',
+              bottom: '-20%',
+              right: '0%',
+              width: '600px',
+              height: '600px',
               borderRadius: '50%',
-              background: 'radial-gradient(circle, var(--accent) 0%, transparent 70%)',
-              filter: 'blur(80px)',
+              background: 'radial-gradient(circle, #8b5cf6 0%, transparent 70%)',
+              filter: 'blur(100px)',
+            }}
+          />
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{
+              opacity: [0.08, 0.18, 0.08],
+              scale: [1, 1.15, 1],
+            }}
+            transition={{ duration: 15, repeat: Infinity, ease: "linear" }}
+            style={{
+              position: 'absolute',
+              top: '30%',
+              right: '30%',
+              width: '350px',
+              height: '350px',
+              borderRadius: '50%',
+              background: 'radial-gradient(circle, #ec4899 0%, transparent 70%)',
+              filter: 'blur(70px)',
             }}
           />
         </div>
@@ -1618,6 +1758,15 @@ const Browse = ({ setView, setCurrentArticleId }) => {
               A deep dive into the architecture of modern scalable systems
             </motion.p>
             <motion.div
+              className="hero-stats"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ delay: 0.9, duration: 0.8 }}
+            >
+              <span className="hero-stat"><strong>{articles.length}</strong> Deep Dives</span>
+              <span className="hero-stat"><strong>{ALL_CATEGORIES.length}</strong> Categories</span>
+            </motion.div>
+            <motion.div
               initial={{ opacity: 0, scale: 0.9 }}
               animate={{ opacity: 1, scale: 1 }}
               transition={{ delay: 1, duration: 0.5 }}
@@ -1654,7 +1803,7 @@ const Browse = ({ setView, setCurrentArticleId }) => {
               className="search-input"
               placeholder="Explore system design topics..."
               value={query}
-              onChange={e => setQuery(e.target.value)}
+              onChange={handleQueryChange}
               aria-label="Search articles"
               autoComplete="off"
               spellCheck="false"
@@ -1714,17 +1863,20 @@ const Browse = ({ setView, setCurrentArticleId }) => {
                   aria-label={`${article.date}: ${article.title}`}
                   onKeyDown={e => e.key === 'Enter' && openArticle(article.id)}
                 >
-                  <img
-                    src={article.image}
-                    alt={`Thumbnail for ${article.title}`}
-                    className="card-image"
-                    loading="lazy"
-                  />
+                  <div className="card-image-wrap">
+                    <img
+                      src={article.image}
+                      alt={`Thumbnail for ${article.title}`}
+                      className="card-image"
+                      loading="lazy"
+                    />
+                    <div className="card-image-overlay" />
+                    <span className="card-time-badge">{article.readTime}</span>
+                  </div>
                   <div className="card-body">
                     <div className="card-meta">
                       <span className="card-badge">{article.date}</span>
                       <span>{article.category}</span>
-                      <span aria-label={`Reading time: ${article.readTime}`}>{article.readTime}</span>
                     </div>
                     <h2 className="card-title">{article.title}</h2>
                     <p className="card-excerpt">{excerpt}</p>
@@ -1951,6 +2103,7 @@ function App() {
       </footer>
 
       {/* ---- FOCUS MODE EXIT BUTTON ---- */}
+      <ScrollToTop />
       <AnimatePresence>
         {isDistractionFree && (
           <motion.button
